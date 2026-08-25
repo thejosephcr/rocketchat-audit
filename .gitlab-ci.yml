@@ -3,15 +3,83 @@ image: python:3.12-slim
 stages:
   - audit
 
-rocketchat_audit:
+variables:
+  BASELINE_PACKAGE_NAME: "rocketchat-role-baseline"
+
+rocketchat_role_audit:
   stage: audit
 
-  script:
+  before_script:
     - python3 --version
-    - python3 rocketchat_audit.py
+    - apt-get update -qq
+    - apt-get install -y -qq curl jq
+
+    - echo "Searching for previous baseline..."
+
+    - |
+      LATEST_VERSION=$(curl \
+        --fail \
+        --silent \
+        --show-error \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages?package_type=generic&package_name=${BASELINE_PACKAGE_NAME}&order_by=created_at&sort=desc&per_page=1" \
+        | jq -r '.[0].version // empty')
+
+      if [ -n "$LATEST_VERSION" ]; then
+
+        echo "Previous baseline found: version ${LATEST_VERSION}"
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --output roles_permissions_baseline.json \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BASELINE_PACKAGE_NAME}/${LATEST_VERSION}/roles_permissions_baseline.json"
+
+      else
+
+        echo "No previous baseline found."
+        echo "This will be the initial execution."
+
+      fi
+
+  script:
+
+    # Run the audit
+    - python3 rocketchat_role_audit.py
+
+    # Only reached if Python exits successfully
+    - |
+      if [ -f roles_permissions_baseline.json ]; then
+
+        echo "Audit completed successfully."
+        echo "Uploading new baseline..."
+
+        NEW_VERSION="${CI_PIPELINE_ID}"
+
+        echo "New baseline version: ${NEW_VERSION}"
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file roles_permissions_baseline.json \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BASELINE_PACKAGE_NAME}/${NEW_VERSION}/roles_permissions_baseline.json"
+
+        echo "Baseline uploaded successfully."
+
+      else
+
+        echo "ERROR: roles_permissions_baseline.json was not generated."
+        exit 1
+
+      fi
 
   artifacts:
     when: always
     paths:
-      - rocketchat_users.csv
+      - roles_permissions_baseline.json
+      - role_changes.json
     expire_in: 30 days
