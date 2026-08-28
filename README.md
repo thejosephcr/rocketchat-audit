@@ -1,730 +1,641 @@
+# Rocket.Chat Security Audit
 
-# Rocket.Chat User Login Audit
+## Description
 
-Herramienta de auditoría para identificar usuarios de Rocket.Chat que no han iniciado sesión durante un período determinado.
+This project contains automated security audits for Rocket.Chat using GitLab CI/CD.
 
-Tool to audit Rocket.Chat users and identify accounts that have not logged in for a configurable period.
+The project currently includes two independent audits:
 
----
+1. **Role Permission Audit**
 
-## 🇪🇸 Español
+   * Monitors changes to Rocket.Chat roles and permissions.
+   * Detects added and removed roles.
+   * Detects added and removed permissions.
+   * Sends a notification to Rocket.Chat when changes are detected.
+   * Maintains a baseline in the GitLab Package Registry.
 
-### Descripción
+2. **User Audit**
 
-Este script consulta la API de Rocket.Chat y genera un archivo CSV con información de los usuarios y su actividad de inicio de sesión.
+   * Identifies users who have not logged in for 6 months or more.
+   * Identifies users who have never logged in.
+   * Identifies newly created accounts.
+   * Identifies accounts where the creation date cannot be determined.
+   * Generates a CSV report.
+   * Does not modify Rocket.Chat.
 
-El objetivo principal es identificar cuentas que:
-
-- No han iniciado sesión durante más de un número configurable de meses.
-- Nunca han iniciado sesión.
-- Son cuentas recientemente creadas.
-- No pueden ser clasificadas porque Rocket.Chat no proporciona su fecha de creación.
-
-El script es **read-only**: no modifica, elimina, desactiva ni realiza ninguna acción sobre las cuentas de Rocket.Chat.
-
----
-
-### Características
-
-- Compatible con Rocket.Chat API.
-- No requiere dependencias externas de Python.
-- Utiliza únicamente la librería estándar de Python.
-- Obtiene todos los usuarios mediante `users.list`.
-- Utiliza `users.info` únicamente cuando `lastLogin` no está disponible.
-- Permite configurar el período de inactividad.
-- Permite configurar el período considerado como cuenta nueva.
-- Genera un archivo CSV.
-- Incluye estadísticas al finalizar la ejecución.
+Both audits perform read-only operations against Rocket.Chat.
 
 ---
 
-### Requisitos
-
-- Python 3.
-- Acceso a la API de Rocket.Chat.
-- Un usuario/API token con permisos suficientes para consultar información de otros usuarios.
-- Permiso:
+## Project Structure
 
 ```text
-view-full-other-user-info
-````
-
----
-
-### Variables de entorno
-
-El script utiliza las siguientes variables:
-
-| Variable                | Descripción                                 |
-| ----------------------- | ------------------------------------------- |
-| `ROCKETCHAT_URL`        | URL de la instancia de Rocket.Chat          |
-| `ROCKETCHAT_AUTH_TOKEN` | Token de autenticación                      |
-| `ROCKETCHAT_USER_ID`    | ID del usuario utilizado para autenticación |
-
-Ejemplo:
-
-```bash
-export ROCKETCHAT_URL="https://chat.example.com"
-export ROCKETCHAT_AUTH_TOKEN="your-token"
-export ROCKETCHAT_USER_ID="your-user-id"
+rocketchat-audit/
+│
+├── .gitlab-ci.yml
+│
+├── rocketchat_role_audit.py
+│
+└── rocketchat_audit.py
 ```
 
-También pueden proporcionarse únicamente durante la ejecución:
-
-```bash
-ROCKETCHAT_URL="https://chat.example.com" \
-ROCKETCHAT_AUTH_TOKEN="your-token" \
-ROCKETCHAT_USER_ID="your-user-id" \
-python3 rocketchat_audit.py
-```
-
-No es necesario guardar las credenciales dentro del código.
-
----
-
-### Configuración
-
-En el script existen dos variables principales:
-
-```python
-INACTIVE_MONTHS = 6
-NEW_ACCOUNT_DAYS = 7
-```
-
-#### `INACTIVE_MONTHS`
-
-Define cuántos meses deben pasar desde el último login para considerar una cuenta inactiva.
-
-Ejemplo:
-
-```python
-INACTIVE_MONTHS = 6
-```
-
-Generará la categoría:
+Generated files:
 
 ```text
-INACTIVE_6_MONTHS
-```
-
-Si se cambia a:
-
-```python
-INACTIVE_MONTHS = 3
-```
-
-la categoría será automáticamente:
-
-```text
-INACTIVE_3_MONTHS
-```
-
-#### `NEW_ACCOUNT_DAYS`
-
-Define cuántos días se consideran como período de gracia para una cuenta nueva.
-
-Por ejemplo:
-
-```python
-NEW_ACCOUNT_DAYS = 7
-```
-
-Una cuenta creada hace menos de 7 días y que nunca ha iniciado sesión será clasificada como:
-
-```text
-NEW_ACCOUNT
-```
-
----
-
-### Lógica de clasificación
-
-El script utiliza la siguiente lógica:
-
-```text
-                    Usuario
-                       │
-                       ▼
-                  users.list
-                       │
-             ┌─────────┴─────────┐
-             │                   │
-       lastLogin existe    lastLogin = null
-             │                   │
-             ▼                   ▼
-       Calcular fecha        users.info
-       de inactividad             │
-             │                    ▼
-             │              Obtener createdAt
-             │                    │
-             │             ┌──────┴──────┐
-             │             │             │
-             │          < 7 días      >= 7 días
-             │             │             │
-             │             ▼             ▼
-             │       NEW_ACCOUNT   NEVER_LOGGED_IN
-             │
-             ▼
-      ┌──────┴──────┐
-      │             │
-   > 6 meses     <= 6 meses
-      │             │
-      ▼             ▼
- INACTIVE_6      ACTIVE
- MONTHS
-```
-
----
-
-### Categorías
-
-El CSV puede contener las siguientes categorías:
-
-#### `ACTIVE`
-
-El usuario inició sesión dentro del período configurado.
-
-#### `INACTIVE_6_MONTHS`
-
-El último inicio de sesión ocurrió hace más de `INACTIVE_MONTHS`.
-
-El número se genera dinámicamente.
-
-Ejemplo:
-
-```text
-INACTIVE_6_MONTHS
-```
-
-o:
-
-```text
-INACTIVE_3_MONTHS
-```
-
-#### `NEVER_LOGGED_IN`
-
-El usuario nunca ha iniciado sesión y la cuenta tiene al menos `NEW_ACCOUNT_DAYS` días.
-
-#### `NEW_ACCOUNT`
-
-El usuario nunca ha iniciado sesión y la cuenta fue creada hace menos de `NEW_ACCOUNT_DAYS`.
-
-#### `UNKNOWN_NO_CREATED_DATE`
-
-Rocket.Chat no proporcionó `createdAt`, por lo que no es posible determinar si se trata de una cuenta nueva o antigua.
-
-Este estado es especialmente relevante para algunas cuentas creadas mediante SSO/Gmail.
-
-El script **no asume** que estas cuentas sean antiguas o inactivas.
-
-#### `INVALID_LAST_LOGIN`
-
-La API devolvió un valor para `lastLogin`, pero el formato de fecha no pudo ser procesado.
-
----
-
-### API utilizada
-
-El script utiliza principalmente:
-
-```text
-GET /api/v1/users.list
-```
-
-para obtener la lista de usuarios.
-
-Cuando un usuario no tiene `lastLogin`, se realiza una consulta adicional:
-
-```text
-GET /api/v1/users.info
-```
-
-para obtener información adicional, principalmente:
-
-```text
-createdAt
-lastLogin
-```
-
-Esto evita realizar una llamada `users.info` para cada usuario.
-
-Por ejemplo, si existen 500 usuarios pero solamente 20 no tienen `lastLogin:
-
-```text
-1 × users.list
-20 × users.info
-```
-
-en lugar de:
-
-```text
-1 × users.list
-500 × users.info
-```
-
----
-
-### Archivo generado
-
-El script genera:
-
-```text
+role_changes.json
+roles_permissions_baseline.json
 rocketchat_users.csv
 ```
 
-Las columnas son:
-
-| Columna            | Descripción                           |
-| ------------------ | ------------------------------------- |
-| `username`         | Nombre de usuario                     |
-| `name`             | Nombre completo                       |
-| `email`            | Dirección de correo                   |
-| `createdAt`        | Fecha de creación de la cuenta        |
-| `account_age_days` | Antigüedad de la cuenta en días       |
-| `lastLogin`        | Último inicio de sesión               |
-| `inactive_days`    | Días desde el último login            |
-| `category`         | Clasificación de la cuenta            |
-| `active`           | Estado activo/inactivo de Rocket.Chat |
-| `type`             | Tipo de usuario                       |
-| `roles`            | Roles asignados                       |
+These files are generated during pipeline execution and are stored as GitLab artifacts when applicable.
 
 ---
 
-### Ejecución local
+## GitLab CI/CD
 
-Ejemplo:
+The project intentionally uses a single GitLab CI/CD stage:
 
-```bash
-ROCKETCHAT_URL="https://chat.example.com" \
-ROCKETCHAT_AUTH_TOKEN="your-token" \
-ROCKETCHAT_USER_ID="your-user-id" \
-python3 rocketchat_audit.py
+```yaml
+stages:
+  - audit
 ```
 
-Resultado esperado:
+The stage contains two independent jobs:
 
 ```text
-==============================================
- Rocket.Chat User Login Audit
-==============================================
-
-Connecting to Rocket.Chat...
-Users retrieved: 347
-
-==============================================
- Results
-==============================================
-Cutoff date:          2026-02-14T...
-New accounts:         3
-Active:               281
-Inactive > 6 months:  42
-Never logged in:      18
-Unknown created date: 3
-Invalid login:        0
-
-users.info requests:  24
-users.info errors:    0
-
-CSV generated:        rocketchat_users.csv
-==============================================
+audit
+│
+├── rocketchat_role_audit
+│
+└── rocketchat_user_audit
 ```
 
----
-
-### Seguridad
-
-El script es de solo lectura y únicamente realiza solicitudes `GET` a la API de Rocket.Chat.
-
-No realiza:
-
-* Eliminación de usuarios.
-* Desactivación de usuarios.
-* Modificación de cuentas.
-* Cambios de roles.
-* Cambios de contraseñas.
-* Cambios de configuración.
-
-Las credenciales deben almacenarse mediante variables de entorno o mecanismos seguros de CI/CD.
-
-No se recomienda almacenar tokens directamente en el código fuente.
+The two jobs can execute independently and do not depend on each other.
 
 ---
 
-### GitLab CI/CD
+## Role Permission Audit
 
-El script puede ejecutarse mediante GitLab CI/CD de forma periódica.
-
-Las siguientes variables pueden configurarse como **CI/CD Variables**:
+### Script
 
 ```text
-ROCKETCHAT_URL
-ROCKETCHAT_AUTH_TOKEN
-ROCKETCHAT_USER_ID
+rocketchat_role_audit.py
 ```
 
-El token debe configurarse como una variable protegida/oculta según las políticas de seguridad de GitLab de la organización.
-
-El archivo CSV puede almacenarse como artifact del pipeline.
-
----
-
-## 🇺🇸 English
-
-### Description
-
-This script queries the Rocket.Chat API and generates a CSV report containing user information and login activity.
-
-Its main purpose is to identify accounts that:
-
-* Have not logged in for more than a configurable number of months.
-* Have never logged in.
-* Are newly created accounts.
-* Cannot be classified because Rocket.Chat does not provide their creation date.
-
-The script is **read-only**: it does not modify, delete, deactivate, or otherwise change Rocket.Chat accounts.
-
----
-
-### Features
-
-* Compatible with the Rocket.Chat API.
-* No external Python dependencies.
-* Uses only the Python standard library.
-* Retrieves users using `users.list`.
-* Uses `users.info` only when `lastLogin` is unavailable.
-* Configurable inactivity threshold.
-* Configurable new-account grace period.
-* Generates a CSV report.
-* Displays execution statistics.
-
----
-
-### Requirements
-
-* Python 3.
-* Access to the Rocket.Chat API.
-* An API user/token with sufficient permissions to retrieve other users' information.
-* Permission:
+The script retrieves Rocket.Chat roles and permissions using:
 
 ```text
-view-full-other-user-info
+/api/v1/roles.list
+/api/v1/permissions.listAll
 ```
+
+The information is used to build a relationship between:
+
+```text
+Role → Permissions
+```
+
+The current state is compared against the previous baseline.
 
 ---
 
-### Environment Variables
+### Detected Changes
 
-The script requires:
+The audit can detect the following changes:
 
-| Variable                | Description                   |
-| ----------------------- | ----------------------------- |
-| `ROCKETCHAT_URL`        | Rocket.Chat instance URL      |
-| `ROCKETCHAT_AUTH_TOKEN` | Authentication token          |
-| `ROCKETCHAT_USER_ID`    | ID of the authentication user |
+```text
+ROLE_ADDED
+ROLE_REMOVED
+PERMISSION_ADDED
+PERMISSION_REMOVED
+```
+
+#### Permission Added
 
 Example:
 
-```bash
-export ROCKETCHAT_URL="https://chat.example.com"
-export ROCKETCHAT_AUTH_TOKEN="your-token"
-export ROCKETCHAT_USER_ID="your-user-id"
+```text
+Permission Added: abac-management | Role: Infosec
 ```
 
-The variables can also be supplied only for a single execution:
-
-```bash
-ROCKETCHAT_URL="https://chat.example.com" \
-ROCKETCHAT_AUTH_TOKEN="your-token" \
-ROCKETCHAT_USER_ID="your-user-id" \
-python3 rocketchat_audit.py
-```
-
-Credentials do not need to be stored in the source code.
-
----
-
-### Configuration
-
-The script contains two main configuration variables:
-
-```python
-INACTIVE_MONTHS = 6
-NEW_ACCOUNT_DAYS = 7
-```
-
-#### `INACTIVE_MONTHS`
-
-Defines how many months must have passed since the user's last login for the account to be considered inactive.
+#### Permission Removed
 
 Example:
 
+```text
+Permission Removed: abac-management | Role: Infosec
+```
+
+#### Role Added
+
+Example:
+
+```text
+Role Added: HelpDesk
+```
+
+#### Role Removed
+
+Example:
+
+```text
+Role Removed: expert
+```
+
+---
+
+## Role Audit Output
+
+The detected changes are stored in:
+
+```text
+role_changes.json
+```
+
+Example:
+
+```json
+[
+  {
+    "timestamp": "2026-08-27T16:50:24.476824+00:00",
+    "change": "PERMISSION_ADDED",
+    "role_id": "695da6d68edc5f7637c355d4",
+    "role": "Infosec",
+    "permission": "abac-management"
+  }
+]
+```
+
+If no changes are detected:
+
+```json
+[]
+```
+
+---
+
+## Baseline Management
+
+The Role Permission Audit uses a baseline to determine whether roles or permissions have changed.
+
+The baseline file is:
+
+```text
+roles_permissions_baseline.json
+```
+
+The baseline is stored in the GitLab Package Registry as a Generic Package:
+
+```text
+Package:
+rocketchat-role-baseline
+```
+
+Each baseline is stored using a unique version generated from the Unix timestamp:
+
+```bash
+CURRENT_VERSION=$(date +%s)
+```
+
+Example:
+
+```text
+1756313421
+```
+
+---
+
+### Baseline Workflow
+
+The Role Audit follows this process:
+
+```text
+1. Check GitLab Package Registry
+             |
+             v
+2. Find latest baseline
+             |
+             v
+3. Download previous baseline
+             |
+             v
+4. Query Rocket.Chat
+             |
+             v
+5. Compare current state
+             |
+             v
+6. Generate role_changes.json
+             |
+       +-----+-----+
+       |           |
+     No change   Changes
+       |           |
+       v           v
+     Stop      Notify Rocket.Chat
+                   |
+              +----+----+
+              |         |
+            Failed    Success
+              |         |
+              v         v
+             STOP   Publish baseline
+```
+
+The baseline is only updated after a successful Rocket.Chat notification.
+
+This prevents the audit from losing a detected change if the notification fails.
+
+---
+
+## Rocket.Chat Notifications
+
+Notifications are only sent when changes are detected.
+
+Example:
+
+```text
+Rocket.Chat Role Permission Audit
+Permission Added: `abac-management` | Role: `Infosec`
+```
+
+Another example:
+
+```text
+Rocket.Chat Role Permission Audit
+Permission Removed: `abac-management` | Role: `Infosec`
+```
+
+For role changes:
+
+```text
+Rocket.Chat Role Permission Audit
+Role Removed: `expert`
+```
+
+No notification is sent when there are no changes.
+
+---
+
+## User Audit
+
+### Script
+
+```text
+rocketchat_audit.py
+```
+
+The User Audit reviews Rocket.Chat user activity and generates a CSV report.
+
+The audit is intended to identify accounts that may require review.
+
+The script does not modify users or Rocket.Chat configuration.
+
+---
+
+## Inactivity Threshold
+
+The current inactivity threshold is:
+
+```text
+6 months
+```
+
+The value is defined directly in:
+
+```text
+rocketchat_audit.py
+```
+
+as:
+
 ```python
 INACTIVE_MONTHS = 6
 ```
 
-The resulting category will be:
+`INACTIVE_MONTHS` is intentionally **not configured as a GitLab CI/CD variable**.
 
-```text
-INACTIVE_6_MONTHS
-```
+This keeps the audit criteria fixed and reproducible.
 
-Changing it to:
-
-```python
-INACTIVE_MONTHS = 3
-```
-
-will automatically generate:
-
-```text
-INACTIVE_3_MONTHS
-```
-
-#### `NEW_ACCOUNT_DAYS`
-
-Defines the grace period for newly created accounts.
+If the audit requirement changes in the future, the value can be modified in the Python script and committed through the normal Git workflow.
 
 For example:
 
 ```python
-NEW_ACCOUNT_DAYS = 7
+INACTIVE_MONTHS = 3
 ```
 
-An account created less than 7 days ago with no login will be classified as:
-
-```text
-NEW_ACCOUNT
-```
+would change the audit threshold to three months.
 
 ---
 
-### Classification Logic
+## User Audit Categories
 
-The script follows this logic:
-
-```text
-                     User
-                       │
-                       ▼
-                  users.list
-                       │
-             ┌─────────┴─────────┐
-             │                   │
-       lastLogin exists    lastLogin = null
-             │                   │
-             ▼                   ▼
-       Calculate login        users.info
-       inactivity date             │
-             │                    ▼
-             │              Get createdAt
-             │                    │
-             │             ┌──────┴──────┐
-             │             │             │
-             │          < 7 days      >= 7 days
-             │             │             │
-             │             ▼             ▼
-             │       NEW_ACCOUNT   NEVER_LOGGED_IN
-             │
-             ▼
-      ┌──────┴──────┐
-      │             │
-   > 6 months     <= 6 months
-      │             │
-      ▼             ▼
- INACTIVE_6      ACTIVE
- MONTHS
-```
-
----
-
-### Categories
-
-The CSV may contain the following categories:
-
-#### `ACTIVE`
-
-The user logged in within the configured inactivity period.
-
-#### `INACTIVE_6_MONTHS`
-
-The user's last login was more than `INACTIVE_MONTHS` ago.
-
-The number is generated dynamically.
-
-Examples:
+The User Audit can classify accounts using categories such as:
 
 ```text
 INACTIVE_6_MONTHS
+NEVER_LOGGED_IN
+NEW_ACCOUNT
+UNKNOWN_NO_CREATED_DATE
+ACTIVE
 ```
 
-or:
+### INACTIVE_6_MONTHS
 
-```text
-INACTIVE_3_MONTHS
-```
-
-#### `NEVER_LOGGED_IN`
-
-The user has never logged in and the account is older than `NEW_ACCOUNT_DAYS`.
-
-#### `NEW_ACCOUNT`
-
-The user has never logged in and the account was created less than `NEW_ACCOUNT_DAYS` ago.
-
-#### `UNKNOWN_NO_CREATED_DATE`
-
-Rocket.Chat did not provide `createdAt`, so the script cannot determine whether the account is new or old.
-
-This may occur with some SSO/Gmail-created accounts.
-
-The script **does not assume** that these accounts are old or inactive.
-
-#### `INVALID_LAST_LOGIN`
-
-The API returned a `lastLogin` value, but the date format could not be parsed.
+The user's last login occurred six months or more before the calculated cutoff date.
 
 ---
 
-### API Usage
+### NEVER_LOGGED_IN
 
-The script primarily uses:
-
-```text
-GET /api/v1/users.list
-```
-
-to retrieve the list of users.
-
-When a user does not have `lastLogin`, an additional request is made using:
-
-```text
-GET /api/v1/users.info
-```
-
-to retrieve additional information, mainly:
-
-```text
-createdAt
-lastLogin
-```
-
-This avoids making an additional `users.info` request for every user.
-
-For example, if there are 500 users and only 20 have no `lastLogin`:
-
-```text
-1 × users.list
-20 × users.info
-```
-
-instead of:
-
-```text
-1 × users.list
-500 × users.info
-```
+The user does not have a `lastLogin` value and can be classified as an account that has never logged in.
 
 ---
 
-### Generated File
+### NEW_ACCOUNT
 
-The script generates:
+The account was created recently and has not reached the six-month inactivity threshold.
+
+This prevents recently created accounts from being incorrectly classified as inactive.
+
+---
+
+### UNKNOWN_NO_CREATED_DATE
+
+The required creation date information could not be obtained for the account.
+
+The audit does not assume a creation date when the information is unavailable.
+
+This allows accounts with incomplete API data to be clearly identified instead of being incorrectly classified.
+
+---
+
+## User Audit Output
+
+The User Audit generates:
 
 ```text
 rocketchat_users.csv
 ```
 
-Columns:
-
-| Column             | Description                        |
-| ------------------ | ---------------------------------- |
-| `username`         | Username                           |
-| `name`             | Full name                          |
-| `email`            | Email address                      |
-| `createdAt`        | Account creation date              |
-| `account_age_days` | Account age in days                |
-| `lastLogin`        | Last login timestamp               |
-| `inactive_days`    | Days since last login              |
-| `category`         | Account classification             |
-| `active`           | Rocket.Chat active/inactive status |
-| `type`             | User type                          |
-| `roles`            | Assigned roles                     |
-
----
-
-### Local Execution
-
-Example:
-
-```bash
-ROCKETCHAT_URL="https://chat.example.com" \
-ROCKETCHAT_AUTH_TOKEN="your-token" \
-ROCKETCHAT_USER_ID="your-user-id" \
-python3 rocketchat_audit.py
-```
-
-Expected output:
+The report contains fields such as:
 
 ```text
-==============================================
- Rocket.Chat User Login Audit
-==============================================
+username
+name
+email
+lastLogin
+createdAt
+category
+```
 
-Connecting to Rocket.Chat...
-Users retrieved: 347
+The CSV is stored as a GitLab artifact for:
 
-==============================================
- Results
-==============================================
-Cutoff date:          2026-02-14T...
-New accounts:         3
-Active:               281
-Inactive > 6 months:  42
-Never logged in:      18
-Unknown created date: 3
-Invalid login:        0
-
-users.info requests:  24
-users.info errors:    0
-
-CSV generated:        rocketchat_users.csv
-==============================================
+```text
+30 days
 ```
 
 ---
 
-### Security
+## User Audit Schedule
 
-The script is read-only and only performs `GET` requests against the Rocket.Chat API.
+The User Audit job is configured to run only when the pipeline is triggered by a GitLab Pipeline Schedule:
 
-It does not:
+```yaml
+rules:
+  - if: '$CI_PIPELINE_SOURCE == "schedule"'
+```
 
-* Delete users.
-* Disable users.
-* Modify accounts.
-* Change roles.
-* Change passwords.
-* Modify Rocket.Chat configuration.
-
-Credentials should be stored using environment variables or secure CI/CD mechanisms.
-
-Do not store API tokens directly in the source code.
+This allows the user audit to be executed periodically without requiring it to run on every repository commit.
 
 ---
 
-### GitLab CI/CD
+## Role Audit Schedule
 
-The script can be executed periodically using GitLab CI/CD.
+The Role Permission Audit is configured to run on the default branch:
 
-The following variables can be configured as **GitLab CI/CD Variables**:
+```yaml
+rules:
+  - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+```
+
+A GitLab Pipeline Schedule can therefore be used to perform periodic role and permission checks.
+
+For example, to execute the scheduled pipeline every 15 minutes:
+
+```cron
+*/15 * * * *
+```
+
+This results in executions at:
+
+```text
+00
+15
+30
+45
+```
+
+of every hour.
+
+Because the Role Audit only sends a notification when changes are detected, scheduled executions without changes do not generate Rocket.Chat messages.
+
+---
+
+## CI/CD Variables
+
+The project requires the following GitLab CI/CD variables:
 
 ```text
 ROCKETCHAT_URL
 ROCKETCHAT_AUTH_TOKEN
 ROCKETCHAT_USER_ID
+ROCKETCHAT_WEBHOOK_URL
 ```
 
-The authentication token should be configured as a protected/masked variable according to the organization's GitLab security policies.
+### ROCKETCHAT_URL
 
-The generated CSV can be stored as a pipeline artifact.
+Base URL of the Rocket.Chat instance.
+
+Example:
+
+```text
+https://chat.example.com
+```
+
+### ROCKETCHAT_AUTH_TOKEN
+
+Authentication token used by the Rocket.Chat REST API.
+
+### ROCKETCHAT_USER_ID
+
+User ID associated with the authentication token.
+
+### ROCKETCHAT_WEBHOOK_URL
+
+Complete Incoming Webhook URL used to send notifications to Rocket.Chat.
+
+The complete URL is stored as a single GitLab CI/CD variable.
+
+The webhook URL should never be committed to the repository.
+
+---
+
+## Security
+
+The audit scripts perform read-only operations against Rocket.Chat.
+
+They do not:
+
+* Create users.
+* Delete users.
+* Modify users.
+* Disable users.
+* Modify roles.
+* Modify permissions.
+* Modify Rocket.Chat settings.
+
+The Role Audit only writes the generated baseline to the GitLab Package Registry after a successful notification.
+
+The User Audit only generates a CSV report.
+
+---
+
+## Authentication
+
+Rocket.Chat API authentication is performed using:
+
+```text
+X-Auth-Token
+X-User-Id
+```
+
+The values are provided through GitLab CI/CD variables.
+
+Example local configuration:
+
+```bash
+export ROCKETCHAT_URL="https://chat.example.com"
+export ROCKETCHAT_AUTH_TOKEN="YOUR_TOKEN"
+export ROCKETCHAT_USER_ID="YOUR_USER_ID"
+```
+
+The webhook is only required when sending Role Audit notifications.
+
+---
+
+## Local Execution
+
+### Role Permission Audit
+
+```bash
+export ROCKETCHAT_URL="https://chat.example.com"
+export ROCKETCHAT_AUTH_TOKEN="YOUR_TOKEN"
+export ROCKETCHAT_USER_ID="YOUR_USER_ID"
+
+python3 rocketchat_role_audit.py
+```
+
+The Role Audit requires a previous baseline for change comparison after the initial execution.
+
+---
+
+### User Audit
+
+```bash
+export ROCKETCHAT_URL="https://chat.example.com"
+export ROCKETCHAT_AUTH_TOKEN="YOUR_TOKEN"
+export ROCKETCHAT_USER_ID="YOUR_USER_ID"
+
+python3 rocketchat_audit.py
+```
+
+The current inactivity threshold is six months.
+
+The resulting report is:
+
+```text
+rocketchat_users.csv
+```
+
+---
+
+## Dependencies
+
+The Python scripts use Python 3 and standard Python libraries.
+
+No external Python packages are required.
+
+The GitLab runner uses:
+
+```text
+python:3.12-slim
+```
+
+The Role Audit job installs:
+
+```text
+curl
+jq
+```
+
+because they are required for GitLab Package Registry operations and JSON processing.
+
+---
+
+## GitLab Artifacts
+
+The pipeline can generate the following artifacts:
+
+| File                              | Purpose                              |
+| --------------------------------- | ------------------------------------ |
+| `role_changes.json`               | Detected role and permission changes |
+| `roles_permissions_baseline.json` | Candidate Role/Permission baseline   |
+| `rocketchat_users.csv`            | User activity audit report           |
+
+Artifacts are retained for:
+
+```text
+30 days
+```
+
+---
+
+## Current Scope
+
+The project currently provides two security audit capabilities:
+
+```text
+Rocket.Chat Security Audit
+│
+├── User Audit
+│   │
+│   ├── Inactive users >= 6 months
+│   ├── Never logged in
+│   ├── New accounts
+│   └── Unknown creation date
+│
+└── Role Permission Audit
+    │
+    ├── Roles added
+    ├── Roles removed
+    ├── Permissions added
+    └── Permissions removed
+```
+
+The two audits are intentionally independent and run within the same GitLab CI/CD `audit` stage.
+
+---
+
+## Future Improvements
+
+Potential future enhancements include:
+
+* Additional Rocket.Chat security audits.
+* Automated reporting of inactive accounts to a dedicated channel.
+* Historical tracking of user audit results.
+* Additional role and permission validation rules.
+* Integration with SIEM platforms.
+* Periodic security attestation reports.
+* Detection of unexpected administrative privileges.
