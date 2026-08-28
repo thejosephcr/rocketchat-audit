@@ -3,83 +3,312 @@ image: python:3.12-slim
 stages:
   - audit
 
-variables:
-  BASELINE_PACKAGE_NAME: "rocketchat-role-baseline"
 
 rocketchat_role_audit:
   stage: audit
 
-  before_script:
-    - python3 --version
+  script:
+
+    # ========================================================
+    # Install required tools
+    # ========================================================
+
     - apt-get update -qq
     - apt-get install -y -qq curl jq
 
-    - echo "Searching for previous baseline..."
+    - python3 --version
+
+
+    # ========================================================
+    # Get latest baseline version
+    # ========================================================
 
     - |
+      echo "Checking for previous baseline..."
+
+      PACKAGE_NAME="rocketchat-role-baseline"
+
+      PACKAGE_API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages"
+
       LATEST_VERSION=$(curl \
-        --fail \
         --silent \
         --show-error \
         --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages?package_type=generic&package_name=${BASELINE_PACKAGE_NAME}&order_by=created_at&sort=desc&per_page=1" \
-        | jq -r '.[0].version // empty')
+        "${PACKAGE_API}?package_name=${PACKAGE_NAME}&package_type=generic&per_page=100" |
+        jq -r '.[].version' |
+        sort -V |
+        tail -n 1)
 
-      if [ -n "$LATEST_VERSION" ]; then
+      if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "null" ]; then
 
         echo "Previous baseline found: version ${LATEST_VERSION}"
-
-        curl \
-          --fail \
-          --silent \
-          --show-error \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --output roles_permissions_baseline.json \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BASELINE_PACKAGE_NAME}/${LATEST_VERSION}/roles_permissions_baseline.json"
 
       else
 
         echo "No previous baseline found."
-        echo "This will be the initial execution."
+
+        LATEST_VERSION=""
 
       fi
 
-  script:
 
-    # Run the audit
-    - python3 rocketchat_role_audit.py
+    # ========================================================
+    # Download previous baseline
+    # ========================================================
 
-    # Only reached if Python exits successfully
     - |
-      if [ -f roles_permissions_baseline.json ]; then
+      if [ -n "$LATEST_VERSION" ]; then
 
-        echo "Audit completed successfully."
-        echo "Uploading new baseline..."
+        BASELINE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${LATEST_VERSION}/roles_permissions_baseline.json"
 
-        NEW_VERSION="${CI_PIPELINE_ID}"
+        echo "Downloading baseline..."
 
-        echo "New baseline version: ${NEW_VERSION}"
-
-        curl \
-          --fail \
+        HTTP_STATUS=$(curl \
           --silent \
           --show-error \
+          --output baseline_previous.json \
+          --write-out "%{http_code}" \
           --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file roles_permissions_baseline.json \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BASELINE_PACKAGE_NAME}/${NEW_VERSION}/roles_permissions_baseline.json"
+          "${BASELINE_URL}")
 
-        echo "Baseline uploaded successfully."
+        if [ "$HTTP_STATUS" != "200" ]; then
+
+          echo "ERROR: Failed to download previous baseline."
+          echo "HTTP Status: ${HTTP_STATUS}"
+
+          rm -f baseline_previous.json
+
+          exit 1
+
+        fi
+
+        echo "Previous baseline downloaded successfully."
 
       else
 
-        echo "ERROR: roles_permissions_baseline.json was not generated."
+        echo "Starting without a previous baseline."
+
+      fi
+
+
+    # ========================================================
+    # Run audit
+    # ========================================================
+
+    - |
+      python3 rocketchat_role_audit.py
+
+
+    # ========================================================
+    # Check detected changes
+    # ========================================================
+
+    - |
+      if [ ! -f role_changes.json ]; then
+
+        echo "ERROR: role_changes.json was not generated."
+
         exit 1
 
       fi
 
+      CHANGE_COUNT=$(jq 'length' role_changes.json)
+
+      echo "Detected changes: ${CHANGE_COUNT}"
+
+      if [ "$CHANGE_COUNT" -eq 0 ]; then
+
+        echo "No changes detected."
+        echo "No Rocket.Chat notification will be sent."
+        echo "Baseline will NOT be updated."
+
+        exit 0
+
+      fi
+
+      echo "Changes detected. Notification is required."
+
+
+    # ========================================================
+    # Build Rocket.Chat notification
+    # ========================================================
+
+    - |
+      MESSAGE_TEXT=$(python3 - <<'PY'
+      import json
+
+      with open("role_changes.json", "r", encoding="utf-8") as f:
+          changes = json.load(f)
+
+      lines = [
+          "*Rocket.Chat Role Permission Audit*"
+      ]
+
+      for change in changes:
+
+          change_type = change.get("change")
+          role = change.get("role", "Unknown")
+          permission = change.get("permission")
+
+          if change_type == "PERMISSION_ADDED":
+
+              lines.append(
+                  f"Permission Added: `{permission}` | Role: `{role}`"
+              )
+
+          elif change_type == "PERMISSION_REMOVED":
+
+              lines.append(
+                  f"Permission Removed: `{permission}` | Role: `{role}`"
+              )
+
+          elif change_type == "ROLE_ADDED":
+
+              lines.append(
+                  f"Role Added: `{role}`"
+              )
+
+          elif change_type == "ROLE_REMOVED":
+
+              lines.append(
+                  f"Role Removed: `{role}`"
+              )
+
+      print("\n".join(lines))
+      PY
+      )
+
+    # ========================================================
+    # Send Rocket.Chat notification
+    # ========================================================
+
+    - |
+      MESSAGE_TEXT_ESCAPED=$(printf "%s" "$MESSAGE_TEXT" | jq -Rs .)
+
+      echo "Sending notification to Rocket.Chat..."
+
+      http_response=$(curl \
+        --request POST \
+        --silent \
+        --show-error \
+        --connect-timeout 10 \
+        --max-time 30 \
+        --write-out "\nHTTP_STATUS:%{http_code}" \
+        --url "$ROCKETCHAT_WEBHOOK_URL" \
+        --header "content-type:application/json" \
+        --data "{\"alias\":\"SecOps\",\"text\":$MESSAGE_TEXT_ESCAPED}")
+
+      echo "Rocket.Chat response:"
+      echo "$http_response"
+
+      HTTP_STATUS=$(echo "$http_response" |
+        sed -n 's/.*HTTP_STATUS:\([0-9]*\).*/\1/p')
+
+      if [ "$HTTP_STATUS" != "200" ]; then
+
+        echo "ERROR: Rocket.Chat notification failed."
+        echo "HTTP Status: ${HTTP_STATUS}"
+        echo "Baseline will NOT be updated."
+
+        exit 1
+
+      fi
+
+      echo "Rocket.Chat notification sent successfully."
+
+
+    # ========================================================
+    # Publish new baseline
+    # ========================================================
+
+    - |
+      if [ ! -f roles_permissions_baseline.json ]; then
+
+        echo "ERROR: Candidate baseline not found."
+
+        exit 1
+
+      fi
+
+      echo "Publishing new baseline..."
+
+      CURRENT_VERSION=$(date +%s)
+
+      echo "New baseline version: ${CURRENT_VERSION}"
+
+      BASELINE_UPLOAD_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${CURRENT_VERSION}/roles_permissions_baseline.json"
+
+      HTTP_STATUS=$(curl \
+        --silent \
+        --show-error \
+        --output /tmp/upload_response \
+        --write-out "%{http_code}" \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --upload-file roles_permissions_baseline.json \
+        "${BASELINE_UPLOAD_URL}")
+
+      echo "GitLab Package Registry HTTP status: ${HTTP_STATUS}"
+
+      if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+
+        echo "ERROR: Failed to publish new baseline."
+
+        cat /tmp/upload_response
+
+        exit 1
+
+      fi
+
+      echo "Baseline published successfully."
+
+
   artifacts:
     when: always
     paths:
-      - roles_permissions_baseline.json
       - role_changes.json
+      - roles_permissions_baseline.json
     expire_in: 30 days
+
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# ============================================================
+# USER AUDIT
+# ============================================================
+
+rocketchat_user_audit:
+  stage: audit
+
+  script:
+
+    - python3 --version
+
+    - |
+      echo "Starting Rocket.Chat user audit..."
+      echo "Inactive threshold: 6 months"
+
+    - python3 rocketchat_audit.py
+
+    - |
+      if [ ! -f rocketchat_users.csv ]; then
+
+        echo "ERROR: rocketchat_users.csv was not generated."
+
+        exit 1
+
+      fi
+
+      echo "User audit completed successfully."
+
+      echo "Generated report:"
+      ls -lh rocketchat_users.csv
+
+  artifacts:
+    when: always
+    paths:
+      - rocketchat_users.csv
+    expire_in: 30 days
+
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'

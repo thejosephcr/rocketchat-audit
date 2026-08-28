@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 
+import os
+import json
 import urllib.request
 import urllib.parse
-import json
-import os
-import sys
 from datetime import datetime, timezone
 
 
@@ -12,11 +11,12 @@ from datetime import datetime, timezone
 # Configuration
 # ============================================================
 
-ROCKETCHAT_URL = os.environ["ROCKETCHAT_URL"]
-AUTH_TOKEN = os.environ["ROCKETCHAT_AUTH_TOKEN"]
-USER_ID = os.environ["ROCKETCHAT_USER_ID"]
+ROCKETCHAT_URL = os.environ["ROCKETCHAT_URL"].rstrip("/")
+ROCKETCHAT_AUTH_TOKEN = os.environ["ROCKETCHAT_AUTH_TOKEN"]
+ROCKETCHAT_USER_ID = os.environ["ROCKETCHAT_USER_ID"]
 
-BASELINE_FILE = "roles_permissions_baseline.json"
+BASELINE_FILE = "baseline_previous.json"
+CANDIDATE_BASELINE_FILE = "roles_permissions_baseline.json"
 CHANGES_FILE = "role_changes.json"
 
 
@@ -24,228 +24,153 @@ CHANGES_FILE = "role_changes.json"
 # Rocket.Chat API
 # ============================================================
 
-def api_get(endpoint, params=None):
+def rocket_chat_get(endpoint, params=None):
 
     url = f"{ROCKETCHAT_URL}{endpoint}"
 
     if params:
         url += "?" + urllib.parse.urlencode(params)
 
-    headers = {
-        "X-Auth-Token": AUTH_TOKEN,
-        "X-User-Id": USER_ID,
-        "Content-Type": "application/json"
-    }
-
     request = urllib.request.Request(
         url,
-        headers=headers,
-        method="GET"
+        headers={
+            "X-Auth-Token": ROCKETCHAT_AUTH_TOKEN,
+            "X-User-Id": ROCKETCHAT_USER_ID,
+            "Content-Type": "application/json",
+        },
+        method="GET",
     )
 
-    try:
+    with urllib.request.urlopen(
+        request,
+        timeout=30
+    ) as response:
 
-        with urllib.request.urlopen(
-            request,
-            timeout=30
-        ) as response:
+        data = response.read().decode("utf-8")
 
-            response_data = response.read().decode("utf-8")
-
-    except Exception as e:
-
-        print(f"ERROR: API request failed: {endpoint}")
-        print(f"Details: {e}")
-
-        return None
-
-    try:
-
-        data = json.loads(response_data)
-
-    except json.JSONDecodeError:
-
-        print(
-            f"ERROR: Invalid JSON returned by {endpoint}"
-        )
-
-        return None
-
-    if not data.get("success"):
-
-        print(
-            f"ERROR: Rocket.Chat API returned "
-            f"success=false for {endpoint}"
-        )
-
-        return None
-
-    return data
+        return json.loads(data)
 
 
 # ============================================================
-# Get roles
+# Get Roles
 # ============================================================
 
 def get_roles():
 
-    data = api_get(
+    print("Retrieving roles...")
+
+    data = rocket_chat_get(
         "/api/v1/roles.list"
     )
 
-    if data is None:
-        sys.exit(1)
+    roles = data.get(
+        "roles",
+        []
+    )
 
-    roles = data.get("roles", [])
+    print(
+        f"Roles retrieved: {len(roles)}"
+    )
 
-    role_map = {}
-
-    for role in roles:
-
-        role_id = role.get("_id")
-
-        if not role_id:
-            continue
-
-        role_map[role_id] = {
-            "name": role.get("name", role_id),
-            "description": role.get(
-                "description",
-                ""
-            ),
-            "scope": role.get(
-                "scope",
-                ""
-            ),
-            "protected": role.get(
-                "protected",
-                False
-            ),
-            "mandatory2fa": role.get(
-                "mandatory2fa",
-                False
-            )
-        }
-
-    return role_map
+    return roles
 
 
 # ============================================================
-# Get permissions
+# Get Permissions
 # ============================================================
 
 def get_permissions():
 
-    data = api_get(
+    print("Retrieving permissions...")
+
+    data = rocket_chat_get(
         "/api/v1/permissions.listAll"
     )
 
-    if data is None:
-        sys.exit(1)
-
-    # Rocket.Chat may return permissions under
-    # different keys depending on API response.
     permissions = data.get(
-        "permissions",
+        "update",
         []
     )
 
-    if not permissions:
-
-        permissions = data.get(
-            "update",
-            []
-        )
+    print(
+        f"Permissions retrieved: {len(permissions)}"
+    )
 
     return permissions
 
 
 # ============================================================
-# Build current authorization state
+# Build Role -> Permissions structure
 # ============================================================
 
-def build_current_state(
-    role_map,
+def build_role_permissions(
+    roles,
     permissions
 ):
 
-    state = {}
+    role_names = {
+        role["_id"]: role.get(
+            "name",
+            role["_id"]
+        )
+        for role in roles
+    }
 
-    # --------------------------------------------------------
-    # Add all roles, even if they have no permissions
-    # --------------------------------------------------------
+    role_permissions = {}
 
-    for role_id, role_data in role_map.items():
+    for role_id, role_name in role_names.items():
 
-        state[role_id] = {
-            "name": role_data["name"],
-            "description": role_data["description"],
-            "scope": role_data["scope"],
-            "protected": role_data["protected"],
-            "mandatory2fa": role_data["mandatory2fa"],
+        role_permissions[role_id] = {
+            "name": role_name,
             "permissions": []
         }
 
-    # --------------------------------------------------------
-    # Associate permissions with roles
-    # --------------------------------------------------------
-
     for permission in permissions:
 
-        permission_id = permission.get("_id")
-
-        if not permission_id:
-            continue
-
-        role_ids = permission.get(
-            "roles",
-            []
+        permission_id = permission.get(
+            "_id"
         )
 
-        for role_id in role_ids:
+        for role_id in permission.get(
+            "roles",
+            []
+        ):
 
-            # ------------------------------------------------
-            # If a permission references a role that is not
-            # present in roles.list, keep the role anyway.
-            # ------------------------------------------------
+            if role_id not in role_permissions:
+                continue
 
-            if role_id not in state:
-
-                state[role_id] = {
-                    "name": role_id,
-                    "description": "",
-                    "scope": "",
-                    "protected": False,
-                    "mandatory2fa": False,
-                    "permissions": []
-                }
-
-            state[role_id]["permissions"].append(
+            role_permissions[
+                role_id
+            ][
+                "permissions"
+            ].append(
                 permission_id
             )
 
-    # --------------------------------------------------------
-    # Sort permissions for consistent comparison
-    # --------------------------------------------------------
+    for role_id in role_permissions:
 
-    for role_id in state:
+        role_permissions[
+            role_id
+        ][
+            "permissions"
+        ].sort()
 
-        state[role_id]["permissions"] = sorted(
-            set(
-                state[role_id]["permissions"]
-            )
-        )
-
-    return state
+    return role_permissions
 
 
 # ============================================================
-# Load baseline
+# Load Previous Baseline
 # ============================================================
 
 def load_baseline():
 
-    if not os.path.exists(BASELINE_FILE):
+    if not os.path.exists(
+        BASELINE_FILE
+    ):
+
+        print(
+            "No previous baseline found."
+        )
 
         return None
 
@@ -255,177 +180,176 @@ def load_baseline():
             BASELINE_FILE,
             "r",
             encoding="utf-8"
-        ) as file:
+        ) as f:
 
-            return json.load(file)
-
-    except Exception as e:
+            baseline = json.load(f)
 
         print(
-            "ERROR: Could not read baseline file."
+            "Previous baseline loaded successfully."
         )
 
-        print(f"Details: {e}")
+        return baseline
 
-        sys.exit(1)
-
-
-# ============================================================
-# Save JSON
-# ============================================================
-
-def save_json(filename, data):
-
-    try:
-
-        with open(
-            filename,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False,
-                sort_keys=True
-            )
-
-    except Exception as e:
+    except json.JSONDecodeError as e:
 
         print(
-            f"ERROR: Could not write {filename}"
+            f"ERROR: Invalid baseline JSON: {e}"
         )
 
-        print(f"Details: {e}")
-
-        sys.exit(1)
+        raise
 
 
 # ============================================================
-# Compare roles and permissions
+# Save Candidate Baseline
+# ============================================================
+
+def save_candidate_baseline(
+    current_state
+):
+
+    with open(
+        CANDIDATE_BASELINE_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            current_state,
+            f,
+            indent=2,
+            sort_keys=True
+        )
+
+    print(
+        "Candidate baseline saved successfully."
+    )
+
+    print(
+        f"Candidate baseline: "
+        f"{CANDIDATE_BASELINE_FILE}"
+    )
+
+
+# ============================================================
+# Compare States
 # ============================================================
 
 def compare_states(
-    old_state,
-    new_state
+    previous,
+    current
 ):
 
     changes = []
 
-    detected_at = datetime.now(
+    timestamp = datetime.now(
         timezone.utc
     ).isoformat()
 
-    old_roles = set(
-        old_state.keys()
+    previous_roles = set(
+        previous.keys()
     )
 
-    new_roles = set(
-        new_state.keys()
+    current_roles = set(
+        current.keys()
     )
 
-    # ========================================================
-    # Role added
-    # ========================================================
+    added_roles = (
+        current_roles
+        - previous_roles
+    )
+
+    removed_roles = (
+        previous_roles
+        - current_roles
+    )
+
+    # --------------------------------------------------------
+    # Roles added
+    # --------------------------------------------------------
 
     for role_id in sorted(
-        new_roles - old_roles
+        added_roles
     ):
 
-        role = new_state[role_id]
-
         changes.append({
-            "timestamp": detected_at,
+            "timestamp": timestamp,
             "change": "ROLE_ADDED",
             "role_id": role_id,
-            "role": role["name"],
-            "permission": None
+            "role": current[
+                role_id
+            ][
+                "name"
+            ],
         })
 
-    # ========================================================
-    # Role removed
-    # ========================================================
+    # --------------------------------------------------------
+    # Roles removed
+    # --------------------------------------------------------
 
     for role_id in sorted(
-        old_roles - new_roles
+        removed_roles
     ):
-
-        role = old_state[role_id]
 
         changes.append({
-            "timestamp": detected_at,
+            "timestamp": timestamp,
             "change": "ROLE_REMOVED",
             "role_id": role_id,
-            "role": role["name"],
-            "permission": None
+            "role": previous[
+                role_id
+            ][
+                "name"
+            ],
         })
 
-    # ========================================================
-    # Compare existing roles
-    # ========================================================
+    # --------------------------------------------------------
+    # Permission comparison
+    # --------------------------------------------------------
+
+    common_roles = (
+        previous_roles
+        & current_roles
+    )
 
     for role_id in sorted(
-        old_roles & new_roles
+        common_roles
     ):
 
-        old_role = old_state[role_id]
-        new_role = new_state[role_id]
-
-        old_name = old_role.get(
-            "name",
-            role_id
-        )
-
-        new_name = new_role.get(
-            "name",
-            role_id
-        )
-
-        # ----------------------------------------------------
-        # Role renamed
-        # ----------------------------------------------------
-
-        if old_name != new_name:
-
-            changes.append({
-                "timestamp": detected_at,
-                "change": "ROLE_RENAMED",
-                "role_id": role_id,
-                "role": new_name,
-                "previous_role": old_name,
-                "permission": None
-            })
-
-        # ----------------------------------------------------
-        # Permissions
-        # ----------------------------------------------------
-
-        old_permissions = set(
-            old_role.get(
+        previous_permissions = set(
+            previous[
+                role_id
+            ].get(
                 "permissions",
                 []
             )
         )
 
-        new_permissions = set(
-            new_role.get(
+        current_permissions = set(
+            current[
+                role_id
+            ].get(
                 "permissions",
                 []
             )
         )
 
         added_permissions = (
-            new_permissions - old_permissions
+            current_permissions
+            - previous_permissions
         )
 
         removed_permissions = (
-            old_permissions - new_permissions
+            previous_permissions
+            - current_permissions
         )
 
+        role_name = current[
+            role_id
+        ][
+            "name"
+        ]
+
         # ----------------------------------------------------
-        # Permission added
+        # Permissions added
         # ----------------------------------------------------
 
         for permission in sorted(
@@ -433,15 +357,15 @@ def compare_states(
         ):
 
             changes.append({
-                "timestamp": detected_at,
+                "timestamp": timestamp,
                 "change": "PERMISSION_ADDED",
                 "role_id": role_id,
-                "role": new_name,
-                "permission": permission
+                "role": role_name,
+                "permission": permission,
             })
 
         # ----------------------------------------------------
-        # Permission removed
+        # Permissions removed
         # ----------------------------------------------------
 
         for permission in sorted(
@@ -449,31 +373,50 @@ def compare_states(
         ):
 
             changes.append({
-                "timestamp": detected_at,
+                "timestamp": timestamp,
                 "change": "PERMISSION_REMOVED",
                 "role_id": role_id,
-                "role": new_name,
-                "permission": permission
+                "role": role_name,
+                "permission": permission,
             })
 
     return changes
 
 
 # ============================================================
-# Print changes
+# Save Changes
 # ============================================================
 
-def print_changes(changes):
+def save_changes(
+    changes
+):
 
-    if not changes:
+    with open(
+        CHANGES_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-        print(
-            "No role or permission changes detected."
+        json.dump(
+            changes,
+            f,
+            indent=2
         )
 
-        return
+    print(
+        f"Changes file saved: "
+        f"{CHANGES_FILE}"
+    )
 
-    print()
+
+# ============================================================
+# Display Changes
+# ============================================================
+
+def display_changes(
+    changes
+):
+
     print(
         "=============================================="
     )
@@ -486,26 +429,26 @@ def print_changes(changes):
         "=============================================="
     )
 
-    for change in changes:
+    if not changes:
 
-        print()
+        print(
+            "No changes detected."
+        )
+
+        return
+
+    for change in changes:
 
         print(
             f"Change: {change['change']}"
         )
 
         print(
-            f"Role:   {change['role']}"
+            f"Role:   "
+            f"{change.get('role', 'N/A')}"
         )
 
-        if change.get("previous_role"):
-
-            print(
-                f"Previous role: "
-                f"{change['previous_role']}"
-            )
-
-        if change.get("permission"):
+        if "permission" in change:
 
             print(
                 f"Permission: "
@@ -517,10 +460,11 @@ def print_changes(changes):
             f"{change['timestamp']}"
         )
 
-    print()
+        print()
 
     print(
-        f"Total changes: {len(changes)}"
+        f"Total changes: "
+        f"{len(changes)}"
     )
 
     print(
@@ -546,146 +490,124 @@ def main():
         "=============================================="
     )
 
-    print()
+    try:
 
-    # --------------------------------------------------------
-    # Get current configuration
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Retrieve current state
+        # ----------------------------------------------------
 
-    print(
-        "Retrieving roles..."
-    )
+        roles = get_roles()
 
-    role_map = get_roles()
+        permissions = get_permissions()
 
-    print(
-        f"Roles retrieved: {len(role_map)}"
-    )
-
-    print(
-        "Retrieving permissions..."
-    )
-
-    permissions = get_permissions()
-
-    print(
-        f"Permissions retrieved: "
-        f"{len(permissions)}"
-    )
-
-    # --------------------------------------------------------
-    # Build current state
-    # --------------------------------------------------------
-
-    current_state = build_current_state(
-        role_map,
-        permissions
-    )
-
-    # --------------------------------------------------------
-    # Load baseline
-    # --------------------------------------------------------
-
-    baseline = load_baseline()
-
-    # --------------------------------------------------------
-    # First execution
-    # --------------------------------------------------------
-
-    if baseline is None:
-
-        print()
-
-        print(
-            "No baseline found."
+        current_state = build_role_permissions(
+            roles,
+            permissions
         )
 
+        # ----------------------------------------------------
+        # Load previous baseline
+        # ----------------------------------------------------
+
+        previous_state = load_baseline()
+
+        # ----------------------------------------------------
+        # First run
+        # ----------------------------------------------------
+
+        if previous_state is None:
+
+            print(
+                "Creating initial candidate baseline..."
+            )
+
+            save_candidate_baseline(
+                current_state
+            )
+
+            save_changes([])
+
+            print(
+                "Initial candidate baseline created."
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Compare
+        # ----------------------------------------------------
+
         print(
-            "Creating initial baseline..."
+            "Comparing current state with baseline..."
         )
 
-        save_json(
-            BASELINE_FILE,
+        changes = compare_states(
+            previous_state,
             current_state
         )
 
-        # Empty changes file
-        save_json(
-            CHANGES_FILE,
-            []
+        # ----------------------------------------------------
+        # Save changes
+        # ----------------------------------------------------
+
+        save_changes(
+            changes
         )
 
-        print()
+        # ----------------------------------------------------
+        # Display changes
+        # ----------------------------------------------------
+
+        display_changes(
+            changes
+        )
+
+        # ----------------------------------------------------
+        # Generate candidate baseline
+        # ----------------------------------------------------
+
+        save_candidate_baseline(
+            current_state
+        )
+
+        # ----------------------------------------------------
+        # Finish
+        # ----------------------------------------------------
 
         print(
-            "Baseline created successfully."
+            "Audit completed successfully."
         )
+
+        if changes:
+
+            print(
+                "Changes detected."
+            )
+
+            print(
+                "GitLab CI should send the notification "
+                "before publishing the candidate baseline."
+            )
+
+        else:
+
+            print(
+                "No changes detected."
+            )
+
+    except Exception as e:
 
         print(
-            "No alerts generated on initial run."
+            f"ERROR: Audit failed: {e}"
         )
 
-        print(
-            f"Baseline file: {BASELINE_FILE}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Compare
-    # --------------------------------------------------------
-
-    print()
-
-    print(
-        "Comparing current state with baseline..."
-    )
-
-    changes = compare_states(
-        baseline,
-        current_state
-    )
-
-    # --------------------------------------------------------
-    # Save changes
-    # --------------------------------------------------------
-
-    save_json(
-        CHANGES_FILE,
-        changes
-    )
-
-    # --------------------------------------------------------
-    # Print changes
-    # --------------------------------------------------------
-
-    print_changes(
-        changes
-    )
-
-    # --------------------------------------------------------
-    # Update baseline
-    # --------------------------------------------------------
-
-    save_json(
-        BASELINE_FILE,
-        current_state
-    )
-
-    print()
-
-    print(
-        "Baseline updated successfully."
-    )
-
-    print(
-        f"Changes file: {CHANGES_FILE}"
-    )
+        raise
 
 
 # ============================================================
-# Entry point
+# Entry Point
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
